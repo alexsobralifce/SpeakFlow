@@ -1,0 +1,17 @@
+
+
+> web@0.1.0 lint
+> next lint
+
+Failed to load parser './parser.js' declared in '.eslintrc.json » eslint-config-next/core-web-vitals » /Users/alexandrerocha/SpeakFlow/SpeakFlow/node_modules/eslint-config-next/index.js': Cannot find module 'next/dist/compiled/babel/eslint-parser'
+Require stack:
+- /Users/alexandrerocha/SpeakFlow/SpeakFlow/node_modules/eslint-config-next/parser.js
+- /Users/alexandrerocha/SpeakFlow/SpeakFlow/node_modules/@eslint/eslintrc/dist/eslintrc.cjs
+⠙[1G[0K[1mnpm[22m [31merror[39m Lifecycle script `lint` failed with error:
+⠙[1G[0K[1mnpm[22m [31merror[39m [94mcode[39m [33m1[39m
+⠙[1G[0K[1mnpm[22m [31merror[39m [94mpath[39m /Users/alexandrerocha/SpeakFlow/SpeakFlow/apps/web
+⠙[1G[0K[1mnpm[22m [31merror[39m [94mworkspace[39m web@0.1.0
+⠙[1G[0K[1mnpm[22m [31merror[39m [94mlocation[39m /Users/alexandrerocha/SpeakFlow/SpeakFlow/apps/web
+⠙[1G[0K[1mnpm[22m [31merror[39m command failed
+⠙[1G[0K[1mnpm[22m [31merror[39m [94mcommand[39m sh -c next lint
+⠙[1G[0K
