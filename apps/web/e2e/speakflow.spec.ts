@@ -24,23 +24,15 @@ test.describe('Authentication Flow', () => {
     await page.fill('input[name="confirmPassword"]', TEST_PASSWORD);
     await page.click('button[type="submit"]');
 
-    // 3. Onboarding
+    // 3. Onboarding Chat UI
     await expect(page).toHaveURL(/\/onboarding/);
-    await expect(page.locator('h1')).toContainText('Qual o seu nível de inglês?');
-    await page.click('[data-testid="level-intermediate"]');
-    await page.click('[data-testid="btn-next"]');
+    await expect(page.locator('h2')).toContainText('Assistente SpeakFlow');
 
-    await expect(page.locator('h1')).toContainText('Que tipo de assunto você prefere?');
-    // First topic for intermediate
-    await page.click('[data-testid="scenario-i1"]');
-    await page.click('[data-testid="btn-finish"]');
+    // Check that we have the text input to talk to the AI
+    await expect(page.locator('input[placeholder="Digite sua resposta..."]')).toBeVisible();
 
-    // 4. Home Dashboard
-    await expect(page).toHaveURL(/\/home/);
-    await expect(page.locator('h1')).toContainText("Let's talk");
-
-    // Check Profile Widget
-    await expect(page.locator(`text=${testEmail}`)).toBeVisible();
+    // Note: We do not complete the entire 10-step AI conversation in the E2E test 
+    // to save OpenAI tokens and avoid test flakiness. 
   });
 
   test('logs out and redirects to login, protecting /home', async ({ page, request }) => {

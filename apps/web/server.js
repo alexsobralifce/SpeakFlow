@@ -44,6 +44,7 @@ app.prepare().then(() => {
     let sessionHistory = [];
     let sessionLevel = 'beginner';
     let sessionScenario = 'General Chat';
+    let sessionMode = 'practice'; // 'practice' or 'onboarding'
     let sessionSettings = { subtitlesPt: false, suggestionsEnabled: false, pronunciationMode: false };
 
     // Timer handles
@@ -54,10 +55,11 @@ app.prepare().then(() => {
       sessionLevel = config.level || sessionLevel;
       sessionScenario = config.scenario || sessionScenario;
       sessionSettings = config.settings || sessionSettings;
+      sessionMode = config.mode || 'practice';
       sessionHistory = [];
       console.log('[Session] Settings:', sessionSettings);
 
-      console.log(`[Session] Started. Level: ${sessionLevel}. Scenario: ${sessionScenario}`);
+      console.log(`[Session] Started. Mode: ${sessionMode}. Level: ${sessionLevel}. Scenario: ${sessionScenario}`);
 
       sessionTimeout = setTimeout(() => {
         console.log(`[Session] 10m limit reached for ${socket.id}`);
@@ -67,7 +69,9 @@ app.prepare().then(() => {
         }
       }, SESSION_DURATION_MS);
 
-      const greeting = `Hello! We have 10 minutes to practice. What topic would you like to study today?`;
+      const greeting = sessionMode === 'onboarding'
+        ? "Olá! 👋 Que bom ter você aqui! Antes de começar, vou te fazer algumas perguntas rápidas para personalizar suas sessões de inglês. Pode responder à vontade — não tem certo ou errado! Vamos começar: qual é o seu nome?"
+        : `Hello! We have 10 minutes to practice. What topic would you like to study today?`;
 
       try {
         if (ttsClient) {
@@ -134,6 +138,12 @@ app.prepare().then(() => {
       }
     });
 
+    socket.on('text_message', (text) => {
+      if (text) {
+        processTurn(text);
+      }
+    });
+
     // Fallback: receive the entire webm audio file to process via OpenAI Whisper
     socket.on('process_audio_file', async (arrayBuffer) => {
       try {
@@ -177,7 +187,10 @@ app.prepare().then(() => {
       try {
         socket.emit('ai_thinking', true);
 
-        const sysPrompt = buildPrompt(sessionLevel, sessionScenario, sessionSettings);
+        const sysPrompt = sessionMode === 'onboarding'
+          ? buildOnboardingPrompt()
+          : buildPrompt(sessionLevel, sessionScenario, sessionSettings);
+
         const msgs = [
           { role: 'system', content: sysPrompt },
           ...sessionHistory,
@@ -197,6 +210,7 @@ app.prepare().then(() => {
         const pronunciationTips = parsed.pronunciation_tips || [];
         const suggestions = parsed.suggestions || [];
         const sessionClosing = parsed.session_closing || null;
+        const profileResponse = parsed.profile || null;
 
         // Save to history
         sessionHistory.push({ role: 'user', content: userText });
@@ -210,6 +224,7 @@ app.prepare().then(() => {
           pronunciationTips,
           suggestions,
           sessionClosing,
+          profile: profileResponse,
         });
 
         // TTS
@@ -361,6 +376,69 @@ When the user says goodbye or ends the session voluntarily, you must populate th
 You MUST return a valid JSON object with this exact schema:
 {
 ${schemaFields}
+}
+`;
+}
+
+function buildOnboardingPrompt() {
+  return `You are a friendly English learning assistant conducting a user onboarding in an app called SpeakFlow.
+Your goal is to collect the user's personal profile through a natural, warm conversation in PORTUGUESE (PT-BR).
+Do NOT start teaching English yet. The entire conversation must be in Portuguese.
+
+## Your Objective
+Collect the following profile fields through casual conversation, never as a cold form.
+Ask ONE question at a time. Wait for each answer before proceeding to the next question.
+
+## Fields to Collect (in this order)
+
+BLOCK 1 — Identity
+- full_name
+- age
+- city
+- profession
+- work_sector (health, tech, education, finance, retail, other)
+- english_study_time (never, less than 1 year, 1-3 years, 3+ years)
+- lived_or_traveled_english_country (yes/no + where)
+- main_goal (work, travel, immigration, entertainment, personal challenge, study abroad)
+
+BLOCK 2 — Personal Life
+- marital_status (single, married, relationship, divorced)
+- has_children (yes/no + ages if yes)
+- has_pets (yes/no + type)
+- living_situation (alone, with family, with roommates)
+- city_type (capital, interior, coast)
+
+BLOCK 3 — Interests
+- favorite_sports (list, max 3)
+- entertainment_type (movies, series, anime, games, music, podcasts)
+- favorite_genres (action, drama, comedy, horror, documentary, sci-fi)
+- hobbies (cooking, travel, reading, photography, other)
+- study_interests (technology, business, health, history, science, philosophy)
+
+BLOCK 4 — Professional Context
+- has_international_colleagues (yes/no)
+- uses_english_at_work (reading, writing, meetings, none)
+- has_english_meetings (yes/no + frequency)
+
+BLOCK 5 — Learning Preferences
+- best_study_time (morning, afternoon, night)
+- correction_preference (during_speech, end_of_session, never)
+- learning_style (gradual, challenged)
+- biggest_difficulty (vocabulary, pronunciation, grammar, fluency, confidence)
+- short_term_goal (free text, max 20 words)
+- long_term_goal (free text, max 20 words)
+
+## Conversation Rules
+- Ask only ONE question per message.
+- Use a warm, encouraging tone in Portuguese.
+- If the user skips a question, mark field as null and move on.
+- If the user gives a vague answer, ask one follow-up to clarify.
+- Once all blocks are collected, thank the user and tell them their profile is ready.
+
+You MUST return a JSON object on EVERY response with this schema:
+{
+  "reply": "Seu texto conversacional em português, sempre terminando com a próxima pergunta se o perfil ainda estiver incompleto.",
+  "profile": { ... preencha com os blocos apenas quando tudos os dados forem coletados. Se ainda estiver coletando dados, omita a chave "profile" inteira ou mande null ... }
 }
 `;
 }

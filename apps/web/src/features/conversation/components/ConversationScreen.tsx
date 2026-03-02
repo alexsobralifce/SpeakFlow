@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useConversation, TMessage, TSessionSettings } from '../hooks/useConversation';
 
@@ -276,6 +277,7 @@ const formatTime = (s: number) =>
 // Main component
 // ──────────────────────────────────────────────────────────────
 export function ConversationScreen({ initialLevel = 'intermediate', initialTopic }: { initialLevel?: string, initialTopic?: string | null }) {
+  const router = useRouter();
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const {
@@ -310,6 +312,25 @@ export function ConversationScreen({ initialLevel = 'intermediate', initialTopic
       {/* Header */}
       <header className="relative z-20 flex items-center justify-between px-6 py-4 bg-slate-950/50 backdrop-blur-xl border-b border-white/5">
         <div className="flex items-center gap-4">
+          <button
+            onClick={() => {
+              if (sessionActive) {
+                if (confirm('Sair encerrará a sessão atual. Tem certeza?')) {
+                  endSessionFlow();
+                  router.push('/home');
+                }
+              } else {
+                router.push('/home');
+              }
+            }}
+            className="w-10 h-10 flex items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            title="Voltar para o Dashboard"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+          </button>
+
           <Avatar isSpeaking={isSpeaking} />
           <div>
             <h2 className="font-bold text-lg tracking-tight text-white flex items-center gap-2">
