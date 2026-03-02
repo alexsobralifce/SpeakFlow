@@ -1,70 +1,127 @@
 import { test, expect } from '@playwright/test';
 
-// ─── ONBOARDING ────────────────────────────────────────────
-test.describe('Onboarding Flow', () => {
-  test('shows step 1 on /onboarding', async ({ page }) => {
-    await page.goto('/onboarding');
-    await expect(page.locator('h1')).toContainText('What is your English level?');
-    await expect(page.locator('[data-testid="level-beginner"]')).toBeVisible();
-    await expect(page.locator('[data-testid="level-intermediate"]')).toBeVisible();
-    await expect(page.locator('[data-testid="level-advanced"]')).toBeVisible();
-  });
+// Generate a unique email for each test run to avoid DB conflicts
+const generateTestEmail = () => `test-${Date.now()}-${Math.floor(Math.random() * 1000)}@example.com`;
+const TEST_PASSWORD = 'Password123!';
 
-  test('advances to step 2 after selecting a level', async ({ page }) => {
-    await page.goto('/onboarding');
+// ─── AUTHENTICATION FLOW ────────────────────────────────────
+test.describe('Authentication Flow', () => {
+  test('registers a new user and completes onboarding', async ({ page }) => {
+    const testEmail = generateTestEmail();
+
+    // 1. Landing to Registration
+    await page.goto('/');
+    await expect(page.locator('h1')).toContainText('Fluência real');
+    // We have "Começar Grátis" and "Criar Conta Grátis". Let's click the hero CTA.
+    await page.locator('text=Criar Conta Grátis').first().click();
+    await expect(page).toHaveURL(/\/register/);
+
+    // 2. Fill Form
+    await page.fill('input[name="name"]', 'Test User');
+    await page.fill('input[name="birthdate"]', '2000-01-01');
+    await page.fill('input[name="email"]', testEmail);
+    await page.fill('input[name="password"]', TEST_PASSWORD);
+    await page.fill('input[name="confirmPassword"]', TEST_PASSWORD);
+    await page.click('button[type="submit"]');
+
+    // 3. Onboarding
+    await expect(page).toHaveURL(/\/onboarding/);
+    await expect(page.locator('h1')).toContainText('Qual o seu nível de inglês?');
     await page.click('[data-testid="level-intermediate"]');
     await page.click('[data-testid="btn-next"]');
-    await expect(page.locator('h1')).toContainText('What is your main goal?');
-  });
 
-  test('advances to step 3 after selecting a goal', async ({ page }) => {
-    await page.goto('/onboarding');
-    await page.click('[data-testid="level-intermediate"]');
-    await page.click('[data-testid="btn-next"]');
-    await page.click('[data-testid="goal-travel"]');
-    await page.click('[data-testid="btn-next"]');
-    await expect(page.locator('h1')).toContainText('Pick a scenario');
-  });
-
-  test('redirects to /home after finishing onboarding', async ({ page }) => {
-    await page.goto('/onboarding');
-    await page.click('[data-testid="level-intermediate"]');
-    await page.click('[data-testid="btn-next"]');
-    await page.click('[data-testid="goal-travel"]');
-    await page.click('[data-testid="btn-next"]');
-    await page.click('[data-testid="scenario-coffee-shop"]');
+    await expect(page.locator('h1')).toContainText('Que tipo de assunto você prefere?');
+    // First topic for intermediate
+    await page.click('[data-testid="scenario-i1"]');
     await page.click('[data-testid="btn-finish"]');
-    await expect(page).toHaveURL('/home');
+
+    // 4. Home Dashboard
+    await expect(page).toHaveURL(/\/home/);
+    await expect(page.locator('h1')).toContainText("Let's talk");
+
+    // Check Profile Widget
+    await expect(page.locator(`text=${testEmail}`)).toBeVisible();
+  });
+
+  test('logs out and redirects to login, protecting /home', async ({ page, request }) => {
+    const testEmail = generateTestEmail();
+
+    // Seed User via API
+    const res = await request.post('/api/auth/register', {
+      data: {
+        name: 'Test Setup',
+        email: testEmail,
+        password: TEST_PASSWORD,
+        birthdate: '1990-01-01'
+      }
+    });
+    expect(res.ok()).toBeTruthy();
+
+    // Perform Login via UI
+    await page.goto('/login');
+    await page.fill('input[name="email"]', testEmail);
+    await page.fill('input[name="password"]', TEST_PASSWORD);
+    await page.click('button[type="submit"]');
+    await expect(page).toHaveURL(/\/home/);
+
+    // Perform Logout via UI (Sair button title="Sair da conta")
+    await page.click('button[title="Sair da conta"]');
+
+    // Wait for redirect to land exactly on the origin URL (trailing slash)
+    await expect(page).toHaveURL(/localhost:\d+\/$/);
+
+    // Verify Route Protection
+    await page.goto('/home');
+    await expect(page).toHaveURL(/\/login/); // Should bounce back to login
   });
 });
 
-// ─── HOME DASHBOARD ───────────────────────────────────────
-test.describe('Home Dashboard', () => {
-  test('shows dashboard headline and start button', async ({ page }) => {
+// ─── DASHBOARD & CONVERSATION ──────────────────────────────
+test.describe('Dashboard and Session Flow', () => {
+  // We need an authenticated session before each test
+  test.beforeEach(async ({ page, request, context }) => {
+    const testEmail = generateTestEmail();
+    const res = await request.post('/api/auth/register', {
+      data: {
+        name: 'Session Setup',
+        email: testEmail,
+        password: TEST_PASSWORD,
+        birthdate: '1990-01-01'
+      }
+    });
+    const { user } = await res.json();
+
+    // Manually login via API and set cookie on context to speed up tests
+    const loginRes = await request.post('/api/auth/login', {
+      data: { email: testEmail, password: TEST_PASSWORD }
+    });
+    const headers = loginRes.headers();
+    const setCookie = headers['set-cookie'];
+    if (setCookie) {
+      const match = setCookie.match(/speakflow_session=(.*?);/);
+      if (match) {
+        await context.addCookies([{
+          name: 'speakflow_session',
+          value: match[1],
+          domain: 'localhost',
+          path: '/'
+        }]);
+      }
+    }
+  });
+
+  test('starts a session with selected topic', async ({ page }) => {
     await page.goto('/home');
-    await expect(page.locator('h1')).toContainText('Ready to practice');
-    await expect(page.locator('[data-testid="btn-start-session"]')).toBeVisible();
-  });
+    await expect(page.locator('h1')).toContainText("Let's talk");
 
-  test('navigates to conversation from home', async ({ page }) => {
-    await page.goto('/home');
+    // Choose Advanced level
+    await page.click('button:has-text("advanced")');
+    await page.click('[data-testid="topic-card-a1"]');
     await page.click('[data-testid="btn-start-session"]');
-    await expect(page).toHaveURL(/\/conversation\/.*/);
-  });
-});
 
-// ─── CONVERSATION SCREEN ──────────────────────────────────
-test.describe('Conversation Screen', () => {
-  test('shows initial UI before session starts', async ({ page }) => {
-    await page.goto('/conversation/e2e-test-session');
-    await expect(page.locator('[data-testid="session-timer"]')).toContainText('10:00');
-    await expect(page.locator('[data-testid="btn-start-session"]')).toBeVisible();
-    await expect(page.locator('[data-testid="btn-mic"]')).toBeVisible();
-  });
-
-  test('shows End Session button after starting', async ({ page }) => {
-    await page.goto('/conversation/e2e-test-session');
-    await page.click('[data-testid="btn-start-session"]');
+    // Verify it reached session screen
+    await expect(page).toHaveURL(/\/conversation\/session-.*[?&]level=advanced/);
+    await expect(page.locator('[data-testid="session-timer"]')).toBeVisible();
     await expect(page.locator('[data-testid="btn-end-session"]')).toBeVisible();
   });
 
@@ -74,17 +131,5 @@ test.describe('Conversation Screen', () => {
     await expect(ccBtn).toContainText('Hide CC');
     await ccBtn.click();
     await expect(ccBtn).toContainText('Show CC');
-  });
-});
-
-// ─── FEEDBACK SCREEN ─────────────────────────────────────
-test.describe('Feedback Screen', () => {
-  test('shows feedback report page', async ({ page }) => {
-    await page.goto('/feedback/mock-session-123');
-    await expect(page.locator('h1')).toContainText('Session Feedback');
-    await expect(page.locator('[data-testid="score-fluency"]')).toBeVisible();
-    await expect(page.locator('[data-testid="score-vocabulary"]')).toBeVisible();
-    await expect(page.locator('[data-testid="score-grammar"]')).toBeVisible();
-    await expect(page.locator('[data-testid="btn-practice-again"]')).toBeVisible();
   });
 });

@@ -1,1 +1,80 @@
-node_modules
+# ─── Dependencies ─────────────────────────────────────────
+node_modules/
+.pnpm-store/
+.pnpm-node_modules/
+
+# ─── Build outputs ────────────────────────────────────────
+dist/
+build/
+out/
+.next/
+.expo/
+.output/
+
+# ─── TypeScript build cache ───────────────────────────────
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# ─── Turbo cache ──────────────────────────────────────────
+.turbo/
+
+# ─── Environment / Secrets (NUNCA commitar) ───────────────
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+
+# ─── Logs ─────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── OS e IDE ─────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Testes / Coverage ────────────────────────────────────
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+html-report/
+
+# ─── Prisma ───────────────────────────────────────────────
+# Gerado automaticamente pela CLI
+packages/db/node_modules/
+
+# ─── Storybook ────────────────────────────────────────────
+storybook-static/
+
+# ─── Expo / React Native ──────────────────────────────────
+.expo/
+.expo-shared/
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/.metro-cache/
+
+# ─── Arquivos temporários ──────────────────────────────────
+*.tmp
+*.temp
+.cache/
+
+# ─── Google Cloud credentials (NUNCA commitar) ────────────
+*service-account*.json
+*credentials*.json
+gcp-keyfile.json

@@ -3,9 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "build": "turbo run build",
     "dev": "turbo run dev",
+    "build": "turbo run build",
+    "start": "turbo run start",
     "lint": "turbo run lint",
+    "test": "cd apps/web && npx vitest run",
+    "test:e2e": "cd apps/web && npx playwright test",
+    "setup": "npm install && npm run build",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
   "dependencies": {

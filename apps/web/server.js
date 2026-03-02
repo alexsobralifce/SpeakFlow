@@ -16,14 +16,16 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || 'sk-dummy-key-for-build',
 });
 
-// Avoid instantiating during build if running in CI without keys
-let speechClient;
-let ttsClient;
-try {
-  speechClient = new speech.SpeechClient();
-  ttsClient = new textToSpeech.TextToSpeechClient();
-} catch (e) {
-  console.log('Skipping Google Cloud client init (no credentials)');
+const hasGoogle = !!process.env.GOOGLE_APPLICATION_CREDENTIALS;
+let speechClient = null;
+let ttsClient = null;
+if (hasGoogle) {
+  try {
+    speechClient = new speech.SpeechClient();
+    ttsClient = new textToSpeech.TextToSpeechClient();
+  } catch (e) {
+    console.log('Skipping Google Cloud client init');
+  }
 }
 
 app.prepare().then(() => {
@@ -42,6 +44,7 @@ app.prepare().then(() => {
     let sessionHistory = [];
     let sessionLevel = 'beginner';
     let sessionScenario = 'General Chat';
+    let sessionSettings = { subtitlesPt: false, suggestionsEnabled: false, pronunciationMode: false };
 
     // Timer handles
     let sessionTimeout = null;
@@ -50,11 +53,12 @@ app.prepare().then(() => {
     socket.on('start_session', async (config) => {
       sessionLevel = config.level || sessionLevel;
       sessionScenario = config.scenario || sessionScenario;
+      sessionSettings = config.settings || sessionSettings;
       sessionHistory = [];
+      console.log('[Session] Settings:', sessionSettings);
 
       console.log(`[Session] Started. Level: ${sessionLevel}. Scenario: ${sessionScenario}`);
 
-      // Set 10m auto-kill timer
       sessionTimeout = setTimeout(() => {
         console.log(`[Session] 10m limit reached for ${socket.id}`);
         socket.emit('session_timeout', { message: 'Time is up! Great job today.' });
@@ -63,7 +67,6 @@ app.prepare().then(() => {
         }
       }, SESSION_DURATION_MS);
 
-      // Send initial AI greeting
       const greeting = `Hello! We have 10 minutes to practice. What topic would you like to study today?`;
 
       try {
@@ -75,14 +78,14 @@ app.prepare().then(() => {
           });
           socket.emit('ai_reply_audio', { audioBase64: resp.audioContent.toString('base64'), text: greeting });
         } else {
-          // Fallback to OpenAI TTS if Google not configured properly
           const ttsResponse = await openai.audio.speech.create({
             model: 'tts-1',
             voice: 'alloy',
             input: greeting,
           });
           const ttsBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: greeting });
+          const greetingPt = sessionSettings.subtitlesPt ? 'Olá! Temos 10 minutos para praticar. Qual tema você gostaria de estudar hoje?' : undefined;
+          socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: greeting, textPt: greetingPt });
         }
       } catch (err) {
         console.error(err);
@@ -90,7 +93,7 @@ app.prepare().then(() => {
     });
 
     socket.on('start_recognition_stream', () => {
-      if (!speechClient) return;
+      if (!speechClient) return; // Silent fallback: frontend will send full audio later
 
       recognizeStream = speechClient
         .streamingRecognize({
@@ -131,6 +134,39 @@ app.prepare().then(() => {
       }
     });
 
+    // Fallback: receive the entire webm audio file to process via OpenAI Whisper
+    socket.on('process_audio_file', async (arrayBuffer) => {
+      try {
+        socket.emit('ai_thinking', true);
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const tempFilePath = path.join(os.tmpdir(), `audio-${socket.id}-${Date.now()}.webm`);
+        fs.writeFileSync(tempFilePath, Buffer.from(arrayBuffer));
+
+        const transcription = await openai.audio.transcriptions.create({
+          file: fs.createReadStream(tempFilePath),
+          model: 'whisper-1',
+          language: 'en',
+        });
+
+        fs.unlinkSync(tempFilePath);
+
+        if (transcription.text) {
+          socket.emit('transcription_update', {
+            text: transcription.text,
+            isFinal: true
+          });
+          processTurn(transcription.text);
+        } else {
+          socket.emit('ai_thinking', false);
+        }
+      } catch (err) {
+        console.error('Whisper STT Error:', err);
+        socket.emit('ai_thinking', false);
+      }
+    });
+
     socket.on('disconnect', () => {
       if (sessionTimeout) clearTimeout(sessionTimeout);
       if (recognizeStream) recognizeStream.end();
@@ -139,11 +175,10 @@ app.prepare().then(() => {
 
     async function processTurn(userText) {
       try {
-        // Let client know AI is thinking
         socket.emit('ai_thinking', true);
 
-        const sysPrompt = buildPrompt(sessionLevel, sessionScenario);
-        const messages = [
+        const sysPrompt = buildPrompt(sessionLevel, sessionScenario, sessionSettings);
+        const msgs = [
           { role: 'system', content: sysPrompt },
           ...sessionHistory,
           { role: 'user', content: userText }
@@ -151,32 +186,40 @@ app.prepare().then(() => {
 
         const completion = await openai.chat.completions.create({
           model: 'gpt-4o',
-          messages,
+          messages: msgs,
           response_format: { type: 'json_object' },
         });
 
-        const parsedResponse = JSON.parse(completion.choices[0].message.content || '{}');
-        const aiReplyText = parsedResponse.reply || "I didn't quite catch that.";
+        const parsed = JSON.parse(completion.choices[0].message.content || '{}');
+        const aiReplyText = parsed.reply || "I didn't quite catch that.";
+        const aiReplyPt = parsed.reply_pt || undefined;
+        const corrections = parsed.corrections || [];
+        const pronunciationTips = parsed.pronunciation_tips || [];
+        const suggestions = parsed.suggestions || [];
+        const sessionClosing = parsed.session_closing || null;
 
         // Save to history
         sessionHistory.push({ role: 'user', content: userText });
         sessionHistory.push({ role: 'assistant', content: aiReplyText });
 
-        // Send feedback metadata back immediately
+        // Send text metadata
         socket.emit('ai_reply_text', {
           text: aiReplyText,
-          corrections: parsedResponse.corrections || [],
-          newWords: parsedResponse.new_words || []
+          textPt: aiReplyPt,
+          corrections,
+          pronunciationTips,
+          suggestions,
+          sessionClosing,
         });
 
-        // TTS stream
+        // TTS
         if (ttsClient) {
           const [resp] = await ttsClient.synthesizeSpeech({
             input: { text: aiReplyText },
             voice: { languageCode: 'en-US', name: 'en-US-Journey-F' },
             audioConfig: { audioEncoding: 'MP3' },
           });
-          socket.emit('ai_reply_audio', { audioBase64: resp.audioContent.toString('base64'), text: aiReplyText });
+          socket.emit('ai_reply_audio', { audioBase64: resp.audioContent.toString('base64'), text: aiReplyText, textPt: aiReplyPt, suggestions });
         } else {
           const ttsResponse = await openai.audio.speech.create({
             model: 'tts-1',
@@ -184,7 +227,7 @@ app.prepare().then(() => {
             input: aiReplyText,
           });
           const ttsBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: aiReplyText });
+          socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: aiReplyText, textPt: aiReplyPt, suggestions });
         }
 
       } catch (e) {
@@ -200,21 +243,124 @@ app.prepare().then(() => {
     if (err) throw err;
     console.log(`> Ready on http://localhost:${port}`);
   });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`> Port ${port} is already in use. Another server is running — skipping startup.`);
+      process.exit(0);
+    } else {
+      throw err;
+    }
+  });
 });
 
-function buildPrompt(level, scenario) {
-  return `
-You are an expert native English tutor specifically adapted to teaching Brazilian students.
+function buildPrompt(level, scenario, settings = {}) {
+  const extraFields = [];
+
+  if (settings.subtitlesPt) {
+    extraFields.push('  "reply_pt": "Tradução em português BR do campo reply, natural e coloquial"');
+  }
+
+  if (settings.suggestionsEnabled) {
+    extraFields.push('  "suggestions": [{"text": "uma frase completa em inglês que o aluno poderia dizer como resposta"}]');
+  }
+
+  if (settings.pronunciationMode) {
+    extraFields.push('  "pronunciation_tips": [{"word": "palavra", "phonetic": "/fonetik/", "tip": "dica em PT-BR de como pronunciar"}]');
+  }
+
+  const schemaFields = [
+    '  "reply": "The natural English text you speak back to the user"',
+    '  "corrections": [{"original": "", "corrected": "", "rule": "PT-BR explanation (max 2 lines)"}]',
+    '  "session_closing": null // Or an object {"strengths": [], "improve": "", "next_topic": "", "closing_pt": ""} ONLY IF user says goodbye or ends session voluntarily',
+    ...extraFields
+  ].join(',\n');
+
+  return `You are an English conversation coach inside a language learning application.
+Your ONLY job is to have natural, educational spoken conversations with the user
+in English, adapting your behavior strictly to their current level AND chosen topic.
+
 CURRENT CONTEXT:
 - Student Level: ${level}
 - Scenario: ${scenario}
 
-You MUST return your response as a valid JSON object with the following schema exactly:
+===========================================================
+## CORE BEHAVIOR RULES (all levels)
+===========================================================
+- ALWAYS speak in English
+- If the user writes in Portuguese, acknowledge gently and ask them to try in English
+- NEVER translate full sentences mid-conversation — only in the subtitle block (reply_pt)
+- Keep responses to max 4 sentences per turn
+- Always end with a follow-up question to keep the conversation going
+- Do NOT lecture — guide through questions
+
+===========================================================
+## SPEECH PACE (to format the text for TTS rendering)
+===========================================================
+- Beginner: very slow — comma after every clause, "..." before key words, no contractions ("I am" not "I'm")
+- Intermediate: moderate pace — natural contractions, clear enunciation
+- Advanced: natural fluid pace — idioms introduced naturally
+- Expert: native speed — irony, complex syntax, rhetorical questions
+
+===========================================================
+## PORTUGUESE SUBTITLES — 🇧🇷 Legenda (reply_pt)
+===========================================================
+| Level        | What to translate                              |
+|--------------|------------------------------------------------|
+| Beginner     | Everything, including the follow-up question   |
+| Intermediate | Full message + highlight untranslated key terms|
+| Advanced     | Only idioms and cultural references            |
+| Expert       | Only highly technical or abstract vocabulary   |
+
+===========================================================
+## RESPONSE SUGGESTIONS — 💬 Sugestões (suggestions field)
+===========================================================
+| Level        | Format                                          |
+|--------------|-------------------------------------------------|
+| Beginner     | Max 6 words + 🇧🇷 translation in parentheses   |
+| Intermediate | Natural sentences + one new word per option     |
+| Advanced     | Idiomatic — no translation hints                |
+| Expert       | Counter-arguments or debate angles — no hints   |
+
+===========================================================
+## PRONUNCIATION CORRECTION — 🔊 Pronúncia
+===========================================================
+Phonetic notation rules: Use readable Brazilian phonetics, NOT IPA.
+- "world" → "UÓ-rld"
+- "three" → "THRI" (língua entre os dentes)
+- "beach" → "BICH" (vogal curta)
+
+| Level        | When to correct                                 |
+|--------------|-------------------------------------------------|
+| Beginner     | Every mispronounced word                        |
+| Intermediate | Words that change meaning if mispronounced      |
+| Advanced     | Sounds that would confuse a native speaker      |
+| Expert       | Only if communication breaks entirely           |
+
+===========================================================
+## ERROR CORRECTION MATRIX (corrections field)
+===========================================================
+| Level        | Grammar                  |
+|--------------|--------------------------|
+| Beginner     | Every mistake, recast    |
+| Intermediate | Casual note at end       |
+| Advanced     | Meaning-breaking only    |
+| Expert       | Almost never             |
+
+===========================================================
+## SESSION CLOSING
+===========================================================
+When the user says goodbye or ends the session voluntarily, you must populate the "session_closing" JSON field with a summary:
 {
-  "reply": "The natural English text you are speaking back to the user",
-  "corrections": [{"original": "", "corrected": "", "rule": "PT-BR explanation (max 2 lines)"}],
-  "new_words": [{"word": "", "phonetic": "", "example": ""}]
+  "strengths": ["thing 1", "thing 2"],
+  "improve": "one area to improve",
+  "next_topic": "suggested next topic based on level",
+  "closing_pt": "full PT translation of the closing summary"
 }
-Keep the reply to 1-2 sentences maximum, keeping a fast, engaging continuous dialogue. Ask a follow-up question.
+
+You MUST return a valid JSON object with this exact schema:
+{
+${schemaFields}
+}
 `;
 }
