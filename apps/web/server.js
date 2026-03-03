@@ -46,6 +46,8 @@ app.prepare().then(() => {
     let sessionScenario = 'General Chat';
     let sessionMode = 'practice'; // 'practice' or 'onboarding'
     let sessionSettings = { subtitlesPt: false, suggestionsEnabled: false, pronunciationMode: false };
+    let waitingForUser = false;
+
 
     // Timer handles
     let sessionTimeout = null;
@@ -69,9 +71,49 @@ app.prepare().then(() => {
         }
       }, SESSION_DURATION_MS);
 
-      const greeting = sessionMode === 'onboarding'
-        ? "Olá! 👋 Que bom ter você aqui! Antes de começar, vou te fazer algumas perguntas rápidas para personalizar suas sessões de inglês. Pode responder à vontade — não tem certo ou errado! Vamos começar: qual é o seu nome?"
-        : `Hello! We have 10 minutes to practice. What topic would you like to study today?`;
+      // For onboarding, use the fixed greeting; for practice, generate a rich opening with the AI
+      let greeting;
+      let greetingPt;
+
+      if (sessionMode === 'onboarding') {
+        greeting = "Olá! 👋 Que bom ter você aqui! Antes de começar, vou te fazer algumas perguntas rápidas para personalizar suas sessões de inglês. Pode responder à vontade — não tem certo ou errado! Vamos começar: qual é o seu nome?";
+      } else {
+        // Generate a rich, teacher-style opening using the AI
+        const openingPrompt = [
+          {
+            role: 'system',
+            content: `You are an experienced English teacher. Your student (${sessionLevel} level) has chosen the topic: "${sessionScenario}".
+Write a warm, engaging opening message that:
+1. Welcomes the student and names the topic clearly.
+2. Lists 3-4 specific sub-topics or vocabulary areas you will explore in this session (as a brief overview, not a list of questions).
+3. Immediately asks the FIRST question to kick off the conversation — a natural, open-ended question tied to the topic and appropriate for a ${sessionLevel} student.
+Keep the tone friendly and encouraging. Max 5 sentences total. Speak in English only.`
+          },
+          { role: 'user', content: 'Begin the session.' }
+        ];
+
+        const openingCompletion = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: openingPrompt,
+          max_tokens: 200,
+        });
+
+        greeting = openingCompletion.choices[0].message.content ||
+          `Great choice! Today we're going to practice "${sessionScenario}". Let's dive in — tell me, how familiar are you with this topic?`;
+
+        // If PT subtitles are on, translate the generated greeting too
+        if (sessionSettings.subtitlesPt) {
+          const translationCompletion = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: 'Translate the following English text to natural, colloquial Brazilian Portuguese (PT-BR). Return only the translation, no explanations.' },
+              { role: 'user', content: greeting }
+            ],
+            max_tokens: 250,
+          });
+          greetingPt = translationCompletion.choices[0].message.content || undefined;
+        }
+      }
 
       try {
         if (ttsClient) {
@@ -80,7 +122,7 @@ app.prepare().then(() => {
             voice: { languageCode: 'en-US', name: 'en-US-Journey-F' },
             audioConfig: { audioEncoding: 'MP3' },
           });
-          socket.emit('ai_reply_audio', { audioBase64: resp.audioContent.toString('base64'), text: greeting });
+          socket.emit('ai_reply_audio', { audioBase64: resp.audioContent.toString('base64'), text: greeting, textPt: greetingPt });
         } else {
           const ttsResponse = await openai.audio.speech.create({
             model: 'tts-1',
@@ -88,13 +130,15 @@ app.prepare().then(() => {
             input: greeting,
           });
           const ttsBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          const greetingPt = sessionSettings.subtitlesPt ? 'Olá! Temos 10 minutos para praticar. Qual tema você gostaria de estudar hoje?' : undefined;
           socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: greeting, textPt: greetingPt });
         }
       } catch (err) {
         console.error(err);
       }
+
+      waitingForUser = true; // AI just gave the intro, now we wait for user
     });
+
 
     socket.on('start_recognition_stream', () => {
       if (!speechClient) return; // Silent fallback: frontend will send full audio later
@@ -165,7 +209,8 @@ app.prepare().then(() => {
         if (transcription.text) {
           socket.emit('transcription_update', {
             text: transcription.text,
-            isFinal: true
+            isFinal: true,
+            source: 'whisper'
           });
           processTurn(transcription.text);
         } else {
@@ -183,7 +228,42 @@ app.prepare().then(() => {
       console.log('[Socket] Client disconnected');
     });
 
+    socket.on('nudge_requested', async () => {
+      if (!waitingForUser) return; // Only nudge if we are actually waiting for the user
+
+      const nudgeMessages = [
+        "Hey, still there? 😊 Take your time — no pressure!",
+        "No worries! Whenever you're ready, I'm here to practice with you.",
+        "It's okay to think before you speak — that's actually great practice!",
+      ];
+      const nudge = nudgeMessages[Math.floor(Math.random() * nudgeMessages.length)];
+
+      try {
+        if (ttsClient) {
+          const [resp] = await ttsClient.synthesizeSpeech({
+            input: { text: nudge },
+            voice: { languageCode: 'en-US', name: 'en-US-Journey-F' },
+            audioConfig: { audioEncoding: 'MP3' },
+          });
+          socket.emit('ai_reply_audio', { audioBase64: resp.audioContent.toString('base64'), text: nudge });
+        } else {
+          const ttsResponse = await openai.audio.speech.create({
+            model: 'tts-1',
+            voice: 'alloy',
+            input: nudge,
+          });
+          const ttsBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: nudge });
+        }
+      } catch (err) {
+        console.error('Nudge TTS Error:', err);
+      }
+    });
+
     async function processTurn(userText) {
+      if (waitingForUser && !userText) return; // Ignore empty double triggers
+      waitingForUser = false; // User replied, AI starts processing
+
       try {
         socket.emit('ai_thinking', true);
 
@@ -198,13 +278,21 @@ app.prepare().then(() => {
         ];
 
         const completion = await openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'gpt-4o-mini',
           messages: msgs,
           response_format: { type: 'json_object' },
+          max_tokens: 1200,
         });
 
-        const parsed = JSON.parse(completion.choices[0].message.content || '{}');
-        const aiReplyText = parsed.reply || "I didn't quite catch that.";
+        let parsed = {};
+        try {
+          parsed = JSON.parse(completion.choices[0].message.content || '{}');
+        } catch (parseErr) {
+          console.error('[processTurn] JSON parse failed, finish_reason:', completion.choices[0].finish_reason, parseErr.message);
+          // Fallback: send a safe reply so the session doesn't freeze
+          parsed = { reply: "I'm here! Could you say that again? I want to make sure I understand you correctly." };
+        }
+        const aiReplyText = parsed.reply || "I'm sorry, I didn't quite get that — could you try speaking again, a bit slower? I'm here and listening!";
         const aiReplyPt = parsed.reply_pt || undefined;
         const corrections = parsed.corrections || [];
         const pronunciationTips = parsed.pronunciation_tips || [];
@@ -244,7 +332,7 @@ app.prepare().then(() => {
           const ttsBuffer = Buffer.from(await ttsResponse.arrayBuffer());
           socket.emit('ai_reply_audio', { audioBase64: ttsBuffer.toString('base64'), text: aiReplyText, textPt: aiReplyPt, suggestions });
         }
-
+        waitingForUser = true;
       } catch (e) {
         console.error('Process Turn Error:', e);
       } finally {
@@ -276,9 +364,8 @@ function buildPrompt(level, scenario, settings = {}) {
     extraFields.push('  "reply_pt": "Tradução em português BR do campo reply, natural e coloquial"');
   }
 
-  if (settings.suggestionsEnabled) {
-    extraFields.push('  "suggestions": [{"text": "uma frase completa em inglês que o aluno poderia dizer como resposta"}]');
-  }
+  // Always generate exactly 3 suggestions of varying difficulty
+  extraFields.push('  "suggestions": [{"text": "Simple short sentence"}, {"text": "Intermediate/new word"}, {"text": "Advanced/idiomatic expression"}]');
 
   if (settings.pronunciationMode) {
     extraFields.push('  "pronunciation_tips": [{"word": "palavra", "phonetic": "/fonetik/", "tip": "dica em PT-BR de como pronunciar"}]');
@@ -297,7 +384,15 @@ in English, adapting your behavior strictly to their current level AND chosen to
 
 CURRENT CONTEXT:
 - Student Level: ${level}
-- Scenario: ${scenario}
+- Session Topic: "${scenario}"
+
+===========================================================
+## TOPIC ADHERENCE — CRITICAL
+===========================================================
+- The topic for this session is FIXED: "${scenario}". Do NOT ask the user what they want to talk about — that was already decided.
+- Open the conversation by IMMEDIATELY engaging with "${scenario}". Ask a specific, interesting question about that topic.
+- If the user drifts to an unrelated topic, acknowledge it briefly and guide them back: "That's interesting! Let's explore that with our topic — [connect it back to ${scenario}]."
+- Every question and follow-up should be grounded in the "${scenario}" context.
 
 ===========================================================
 ## CORE BEHAVIOR RULES (all levels)
@@ -306,8 +401,17 @@ CURRENT CONTEXT:
 - If the user writes in Portuguese, acknowledge gently and ask them to try in English
 - NEVER translate full sentences mid-conversation — only in the subtitle block (reply_pt)
 - Keep responses to max 4 sentences per turn
-- Always end with a follow-up question to keep the conversation going
+- ALWAYS end with exactly ONE follow-up question to keep the conversation going — never more than one
 - Do NOT lecture — guide through questions
+
+===========================================================
+## STRICT CONVERSATIONAL DISCIPLINE — CRITICAL
+===========================================================
+- NEVER ask more than ONE question per response. If you have multiple questions, choose the most important one and save the rest for later turns.
+- ALWAYS wait for the student's answer to YOUR question before introducing new questions or topics.
+- If the student's answer is unclear, too short, or off-topic, gently ask them to elaborate or answer the original question BEFORE moving on. Example: "I didn't quite catch that — could you explain a bit more about [topic]?"
+- If the student ignores the question and changes subject, acknowledge it naturally, then guide them back: "That's interesting! But first — [your original question]."
+- Guide the student. Don't just react — actively lead them toward the learning objective of the chosen topic.
 
 ===========================================================
 ## SPEECH PACE (to format the text for TTS rendering)
@@ -330,6 +434,12 @@ CURRENT CONTEXT:
 ===========================================================
 ## RESPONSE SUGGESTIONS — 💬 Sugestões (suggestions field)
 ===========================================================
+You MUST ALWAYS generate EXACTLY 3 suggestions the user could use to reply to your question.
+They MUST vary in complexity to offer different choices to the user:
+- Option 1: Simple / Direct / Safe
+- Option 2: Intermediate / Includes a new word
+- Option 3: Advanced / Idiomatic or challenging
+
 | Level        | Format                                          |
 |--------------|-------------------------------------------------|
 | Beginner     | Max 6 words + 🇧🇷 translation in parentheses   |
@@ -381,64 +491,74 @@ ${schemaFields}
 }
 
 function buildOnboardingPrompt() {
-  return `You are a friendly English learning assistant conducting a user onboarding in an app called SpeakFlow.
-Your goal is to collect the user's personal profile through a natural, warm conversation in PORTUGUESE (PT-BR).
-Do NOT start teaching English yet. The entire conversation must be in Portuguese.
+  return `You are a friendly English specialist conducting a short, smart onboarding for SpeakFlow.
+Your goal is to ask EXACTLY 5 questions in Portuguese to understand the user's English learning goals and context.
+Then generate a clean profile JSON.
 
-## Your Objective
-Collect the following profile fields through casual conversation, never as a cold form.
-Ask ONE question at a time. Wait for each answer before proceeding to the next question.
+===========================================================
+## THE 5 QUESTIONS — Ask in this exact order, ONE per message
+===========================================================
 
-## Fields to Collect (in this order)
+QUESTION 1 — Name + Main Goal
+Ask: "Olá! Tudo bem? 😊 Para começar, pode me dizer seu nome e me contar qual é o seu principal objetivo com o inglês? (ex: trabalho, viagem, imigração, entretenimento, estudo no exterior...)"
+Collect: { full_name, main_goal }
 
-BLOCK 1 — Identity
-- full_name
-- age
-- city
-- profession
-- work_sector (health, tech, education, finance, retail, other)
-- english_study_time (never, less than 1 year, 1-3 years, 3+ years)
-- lived_or_traveled_english_country (yes/no + where)
-- main_goal (work, travel, immigration, entertainment, personal challenge, study abroad)
+QUESTION 2 — Current Level + Biggest Challenge
+Ask: "Que bom, [first_name]! Me conta: você já estudou inglês antes? Se sim, por quanto tempo? E qual é a maior dificuldade que você sente hoje — vocabulário, pronúncia, gramática, falar com fluência ou confiança para se expressar?"
+Collect: { english_study_time, biggest_difficulty }
 
-BLOCK 2 — Personal Life
-- marital_status (single, married, relationship, divorced)
-- has_children (yes/no + ages if yes)
-- has_pets (yes/no + type)
-- living_situation (alone, with family, with roommates)
-- city_type (capital, interior, coast)
+QUESTION 3 — Professional / Study Context
+Ask: "Entendido! E no dia a dia, você usa ou precisa usar o inglês no trabalho ou nos estudos? Me diz sua profissão ou área — e se você tem colegas, clientes ou aulas em inglês."
+Collect: { profession, work_sector, uses_english_at_work, has_international_colleagues }
 
-BLOCK 3 — Interests
-- favorite_sports (list, max 3)
-- entertainment_type (movies, series, anime, games, music, podcasts)
-- favorite_genres (action, drama, comedy, horror, documentary, sci-fi)
-- hobbies (cooking, travel, reading, photography, other)
-- study_interests (technology, business, health, history, science, philosophy)
+QUESTION 4 — Interests (choose topics for sessions)
+Ask: "Show! Agora a parte divertida 🎉 — quais assuntos você mais curte fora do trabalho? Pode ser séries, filmes, esportes, tecnologia, viagens, música... Quanto mais você me contar, mais personalizadas ficam suas sessões!"
+Collect: { interests: string[] }  // free-form list of interests
 
-BLOCK 4 — Professional Context
-- has_international_colleagues (yes/no)
-- uses_english_at_work (reading, writing, meetings, none)
-- has_english_meetings (yes/no + frequency)
+QUESTION 5 — Learning Style + Goal
+Ask: "Última pergunta, prometo! 😄 Como você aprende melhor: prefere ir no seu ritmo com conteúdo progressivo, ou gosta de ser desafiado desde o início? E em 1 frase: qual seria seu sonho de inglês — o que você quer conseguir fazer quando estiver fluente?"
+Collect: { learning_style: 'gradual' | 'challenged', dream_goal: string }
 
-BLOCK 5 — Learning Preferences
-- best_study_time (morning, afternoon, night)
-- correction_preference (during_speech, end_of_session, never)
-- learning_style (gradual, challenged)
-- biggest_difficulty (vocabulary, pronunciation, grammar, fluency, confidence)
-- short_term_goal (free text, max 20 words)
-- long_term_goal (free text, max 20 words)
+===========================================================
+## CONVERSATION RULES
+===========================================================
+- Respond ENTIRELY in Portuguese (PT-BR).
+- Ask ONLY ONE question per message. Wait for the user's answer.
+- Be warm, human and encouraging — never robotic.
+- If the user gives a vague answer, ask ONE brief follow-up, then move on.
+- Infer the user's first name from Question 1 and use it naturally in subsequent messages.
+- After Question 5 is answered, thank the user warmly, tell them their profile is ready and the AI is calibrated for them.
 
-## Conversation Rules
-- Ask only ONE question per message.
-- Use a warm, encouraging tone in Portuguese.
-- If the user skips a question, mark field as null and move on.
-- If the user gives a vague answer, ask one follow-up to clarify.
-- Once all blocks are collected, thank the user and tell them their profile is ready.
+===========================================================
+## PROFILE JSON — Emit ONLY after all 5 answers are collected
+===========================================================
+You MUST return a valid JSON on EVERY message with this structure:
 
-You MUST return a JSON object on EVERY response with this schema:
 {
-  "reply": "Seu texto conversacional em português, sempre terminando com a próxima pergunta se o perfil ainda estiver incompleto.",
-  "profile": { ... preencha com os blocos apenas quando tudos os dados forem coletados. Se ainda estiver coletando dados, omita a chave "profile" inteira ou mande null ... }
+  "reply": "Your warm conversational Portuguese text, ending with the NEXT question if the profile is not yet complete.",
+  "profile": null
 }
+
+ONLY replace "profile": null with the actual profile object after all 5 questions are answered:
+
+{
+  "reply": "Your closing warm message in Portuguese.",
+  "profile": {
+    "full_name": "",
+    "main_goal": "",
+    "english_study_time": "",
+    "biggest_difficulty": "",
+    "profession": "",
+    "work_sector": "",
+    "uses_english_at_work": "",
+    "has_international_colleagues": false,
+    "interests": [],
+    "learning_style": "",
+    "dream_goal": ""
+  }
+}
+
+IMPORTANT: Do NOT emit the profile object before all 5 questions are answered.
 `;
 }
+

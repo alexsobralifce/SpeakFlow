@@ -60,6 +60,21 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
   const audioStreamRef = useRef<MediaStream | null>(null);
   const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const nudgeTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearNudgeTimer = () => {
+    if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
+  };
+
+  const startNudgeTimer = () => {
+    clearNudgeTimer();
+    nudgeTimerRef.current = setTimeout(() => {
+      // Only emit if session is active and user is not recording
+      if (mediaRecorderRef.current?.state !== 'recording') {
+        socketRef.current?.emit('nudge_requested');
+      }
+    }, 60000);
+  };
 
   const settingsRef = useRef<TSessionSettings>(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -93,6 +108,8 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
       const audio = new Audio(audioSrc);
       playbackAudioRef.current = audio;
       try { await audio.play(); } catch (e) { console.warn('Audio play blocked:', e); }
+
+      startNudgeTimer();
     });
 
     socketRef.current.on('ai_reply_text', (data: any) => {
@@ -123,11 +140,26 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
       });
     });
 
-    socketRef.current.on('transcription_update', (data: { text: string; isFinal: boolean }) => {
-      setLiveTranscript(data.text);
+    socketRef.current.on('transcription_update', (data: { text: string; isFinal: boolean; source?: string }) => {
       if (data.isFinal) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: data.text }]);
+        setMessages(prev => {
+          if (data.source === 'whisper') {
+            // Whisper gives the definitive full transcription.
+            // UPDATE the last user message if it exists (added by streaming), otherwise add new.
+            const lastUserIdx = [...prev].reverse().findIndex(m => m.role === 'user');
+            if (lastUserIdx !== -1) {
+              const idx = prev.length - 1 - lastUserIdx;
+              const updated = [...prev];
+              updated[idx] = { ...updated[idx], content: data.text };
+              return updated;
+            }
+          }
+          // Google STT final OR no existing user bubble: add new
+          return [...prev, { id: Date.now().toString(), role: 'user', content: data.text }];
+        });
         setLiveTranscript('');
+      } else {
+        setLiveTranscript(data.text);
       }
     });
 
@@ -144,17 +176,10 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
     return () => {
       // eslint-disable-next-line @typescript-eslint/no-use-before-define
       endSessionFlow();
+      clearNudgeTimer();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    // Auto-start session if topic is pre-selected via URL
-    if (initialTopic && !sessionActive && messages.length === 0) {
-      startSessionFlow(initialTopic);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialTopic]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -168,19 +193,29 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionActive, timeRemaining]);
 
-  const startSessionFlow = (topic?: string) => {
+  const startSessionFlow = (topic?: string, overrideSettings?: TSessionSettings) => {
+    // Reconnect socket if it was disconnected from a previous session
+    if (!socketRef.current?.connected) {
+      socketRef.current = io();
+    }
+    const effectiveSettings = overrideSettings ?? settingsRef.current;
+    // Update the ref so the rest of the session uses the correct settings
+    settingsRef.current = effectiveSettings;
+    setSettings(effectiveSettings);
     setSessionActive(true);
     setSessionClosing(null);
     setMessages([]);
+    clearNudgeTimer();
     socketRef.current?.emit('start_session', {
       level: initialLevel,
       scenario: topic || initialTopic || 'Free talk',
-      settings: settingsRef.current,
+      settings: effectiveSettings,
     });
   };
 
   const endSessionFlow = () => {
     setSessionActive(false);
+    clearNudgeTimer();
     // eslint-disable-next-line @typescript-eslint/no-use-before-define
     stopRecording();
     socketRef.current?.disconnect();
@@ -189,6 +224,7 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
   };
 
   const startRecording = async () => {
+    clearNudgeTimer();
     try {
       if (playbackAudioRef.current) playbackAudioRef.current.pause();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -203,26 +239,37 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
           if (socketRef.current?.connected) socketRef.current.emit('audio_data', event.data);
         }
       };
-      mediaRecorder.start(250);
+      // onstop fires only after ALL ondataavailable events complete — zero timeout needed
+      mediaRecorder.onstop = () => {
+        if (audioChunksRef.current.length > 0) {
+          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+          socketRef.current?.emit('process_audio_file', blob);
+          setIsLoading(true);
+        } else {
+          console.warn('[stopRecording] No audio chunks captured.');
+        }
+      };
+      // 100ms timeslice: faster chunk delivery, works better for short recordings
+      mediaRecorder.start(100);
       setIsRecording(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Mic error:', err);
-      alert('Microphone permission denied.');
+      const msg = err.name === 'NotAllowedError'
+        ? 'Permissão de microfone negada. Habilite o microfone nas configurações do navegador.'
+        : err.name === 'NotFoundError'
+          ? 'Nenhum microfone encontrado. Conecte um microfone e tente novamente.'
+          : `Erro ao ativar microfone: ${err.message}`;
+      alert(msg);
     }
   };
 
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
+      // requestData() flushes any buffered audio before stop (important for short taps < timeslice)
+      try { mediaRecorderRef.current.requestData(); } catch (_) { }
+      mediaRecorderRef.current.stop(); // triggers onstop after all chunks are flushed
       audioStreamRef.current?.getTracks().forEach(track => track.stop());
       socketRef.current?.emit('stop_recognition_stream');
-      setTimeout(() => {
-        if (audioChunksRef.current.length > 0) {
-          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
-          socketRef.current?.emit('process_audio_file', blob);
-          setIsLoading(true);
-        }
-      }, 300);
       setIsRecording(false);
       setLiveTranscript('');
     }
@@ -232,6 +279,18 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
 
   const updateSetting = <K extends keyof TSessionSettings>(key: K, value: TSessionSettings[K]) => {
     setSettings(prev => ({ ...prev, [key]: value }));
+  };
+
+  const sendMessage = (text: string) => {
+    if (!sessionActive || !text) return;
+    clearNudgeTimer();
+
+    // Add optimistically
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: text }]);
+    setIsLoading(true);
+
+    // Send to text endpoint
+    socketRef.current?.emit('text_message', text);
   };
 
   return {
@@ -250,5 +309,6 @@ export function useConversation(initialLevel: string = 'intermediate', initialTo
     stopRecording,
     toggleSubtitles,
     updateSetting,
+    sendMessage,
   };
 }

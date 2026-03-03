@@ -164,7 +164,17 @@ const SettingsPanel = ({
 );
 
 // ── Message Bubble ────────────────────────────────────────────
-const MessageBubble = ({ msg, showPt }: { msg: TMessage; showPt: boolean }) => (
+const MessageBubble = ({
+  msg,
+  showPt,
+  showSuggestions,
+  onSuggestionClick
+}: {
+  msg: TMessage;
+  showPt: boolean;
+  showSuggestions?: boolean;
+  onSuggestionClick?: (text: string) => void;
+}) => (
   <div className="flex flex-col mb-6 w-full max-w-2xl px-4">
     <div className={`flex w-full ${msg.role === 'assistant' ? 'justify-start' : 'justify-end'}`}>
       <div
@@ -178,10 +188,10 @@ const MessageBubble = ({ msg, showPt }: { msg: TMessage; showPt: boolean }) => (
       </div>
     </div>
 
-    {/* PT-BR subtitle */}
-    {msg.role === 'assistant' && showPt && msg.contentPt && (
-      <div className="mt-2 ml-1 text-[13px] text-slate-500 italic flex items-start gap-1">
-        <span className="text-xs">🇧🇷</span>
+    {/* PT-BR subtitle — shown alongside English when CC is active */}
+    {msg.role === 'assistant' && msg.contentPt && (
+      <div className="mt-2 ml-1 text-[13px] text-slate-400 italic flex items-start gap-1.5 border-l-2 border-indigo-500/30 pl-2">
+        <span className="text-xs shrink-0">🇧🇷</span>
         <span>{msg.contentPt}</span>
       </div>
     )}
@@ -222,16 +232,20 @@ const MessageBubble = ({ msg, showPt }: { msg: TMessage; showPt: boolean }) => (
     )}
 
     {/* Suggestion chips */}
-    {msg.role === 'assistant' && msg.suggestions && msg.suggestions.length > 0 && (
+    {msg.role === 'assistant' && showSuggestions && msg.suggestions && msg.suggestions.length > 0 && (
       <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
         className="mt-3 ml-1 flex flex-wrap gap-2">
         <p className="w-full text-xs font-bold uppercase tracking-widest text-amber-400 flex items-center gap-1 mb-1">
           <span>💡</span> Você pode dizer:
         </p>
         {msg.suggestions.map((s, i) => (
-          <div key={i} className="px-4 py-2 bg-amber-400/10 border border-amber-400/20 rounded-full text-sm text-amber-200 cursor-default hover:bg-amber-400/20 transition-colors">
+          <button
+            key={i}
+            onClick={() => onSuggestionClick?.(s.text)}
+            className="px-4 py-2 bg-amber-400/10 border border-amber-400/20 rounded-full text-sm text-amber-200 cursor-pointer hover:bg-amber-400/20 transition-colors text-left"
+          >
             "{s.text}"
-          </div>
+          </button>
         ))}
       </motion.div>
     )}
@@ -279,6 +293,13 @@ const formatTime = (s: number) =>
 export function ConversationScreen({ initialLevel = 'intermediate', initialTopic }: { initialLevel?: string, initialTopic?: string | null }) {
   const router = useRouter();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showPreSession, setShowPreSession] = useState(false);
+  // Local pre-session toggle state (independent from session settings)
+  const [preSessionOpts, setPreSessionOpts] = useState({
+    subtitlesPt: false,
+    suggestionsEnabled: false,
+    pronunciationMode: false,
+  });
 
   const {
     messages,
@@ -296,18 +317,122 @@ export function ConversationScreen({ initialLevel = 'intermediate', initialTopic
     stopRecording,
     toggleSubtitles,
     updateSetting,
+    sendMessage,
   } = useConversation(initialLevel, initialTopic);
 
   const handleStartClick = () => {
-    startSessionFlow(initialTopic || 'Free talk');
+    setShowPreSession(true);
+  };
+
+  const handlePreSessionSubmit = () => {
+    setShowPreSession(false);
+    // Pass settings directly to avoid async state race condition
+    startSessionFlow(initialTopic || 'Free talk', preSessionOpts);
   };
 
   const isSpeaking = isLoading || (sessionActive && !isRecording && messages[messages.length - 1]?.role === 'assistant');
 
   const topicsForLevel = TOPICS[initialLevel as keyof typeof TOPICS] || TOPICS.intermediate;
 
+  // Pre-session option definitions
+  const preSessionOptions = [
+    {
+      key: 'subtitlesPt' as const,
+      icon: '🇧🇷',
+      title: 'Tradução em Português',
+      description: 'Exibe uma legenda em PT-BR abaixo de cada fala da IA. Ótimo para iniciantes.',
+    },
+    {
+      key: 'suggestionsEnabled' as const,
+      icon: '💡',
+      title: 'Sugestões de Resposta',
+      description: 'A IA sugere frases que você pode usar. Ajuda quando travar na conversa.',
+    },
+    {
+      key: 'pronunciationMode' as const,
+      icon: '🔊',
+      title: 'Correção de Pronúncia',
+      description: 'A IA analisa sua fala e indica como melhorar palavras específicas.',
+    },
+  ];
+
   return (
     <div className="flex flex-col h-screen bg-slate-950 font-sans overflow-hidden text-slate-100 selection:bg-indigo-500/30">
+
+      {/* Pre-Session Setup Overlay */}
+      <AnimatePresence>
+        {showPreSession && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-950/95 backdrop-blur-xl"
+          >
+            <motion.div
+              initial={{ scale: 0.97, y: 16 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.97, y: 16 }}
+              transition={{ duration: 0.2 }}
+              className="bg-slate-900 border border-white/10 rounded-[28px] p-8 max-w-md w-full shadow-2xl"
+            >
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-white shadow-md">
+                  ⚙️
+                </div>
+                <div>
+                  <h2 className="text-white font-bold text-xl leading-tight">Como deseja praticar?</h2>
+                  <p className="text-slate-500 text-xs">Você pode mudar esses ajustes durante a sessão.</p>
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                {preSessionOptions.map(opt => (
+                  <button
+                    key={opt.key}
+                    onClick={() => setPreSessionOpts(p => ({ ...p, [opt.key]: !p[opt.key] }))}
+                    className={`w-full text-left flex items-start gap-4 p-4 rounded-2xl border transition-all ${preSessionOpts[opt.key]
+                      ? 'bg-indigo-500/10 border-indigo-500/40 ring-1 ring-indigo-500/20'
+                      : 'bg-slate-800/40 border-white/5 hover:border-white/15'
+                      }`}
+                  >
+                    {/* Toggle circle */}
+                    <div className={`mt-0.5 shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${preSessionOpts[opt.key] ? 'border-indigo-400 bg-indigo-500' : 'border-slate-600 bg-transparent'
+                      }`}>
+                      {preSessionOpts[opt.key] && (
+                        <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-white flex items-center gap-2">
+                        <span>{opt.icon}</span> {opt.title}
+                      </p>
+                      <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">{opt.description}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-6 flex flex-col gap-2">
+                <button
+                  onClick={handlePreSessionSubmit}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                  Começar Sessão
+                </button>
+                <button
+                  onClick={() => setShowPreSession(false)}
+                  className="w-full py-2.5 text-slate-400 hover:text-white text-sm font-medium transition-colors"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Header */}
       <header className="relative z-20 flex items-center justify-between px-6 py-4 bg-slate-950/50 backdrop-blur-xl border-b border-white/5">
@@ -441,7 +566,12 @@ export function ConversationScreen({ initialLevel = 'intermediate', initialTopic
             <AnimatePresence>
               {messages.map(msg => (
                 <motion.div key={msg.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="w-full flex flex-col items-center">
-                  <MessageBubble msg={msg} showPt={settings.subtitlesPt} />
+                  <MessageBubble
+                    msg={msg}
+                    showPt={settings.subtitlesPt}
+                    showSuggestions={preSessionOpts.suggestionsEnabled}
+                    onSuggestionClick={sendMessage}
+                  />
                 </motion.div>
               ))}
 

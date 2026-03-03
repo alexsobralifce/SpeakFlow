@@ -2,11 +2,13 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const isInactivityLogout = searchParams.get('reason') === 'inactivity';
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -76,6 +78,12 @@ export default function LoginPage() {
         </div>
 
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="bg-slate-900/80 backdrop-blur-xl rounded-[24px] p-8 border border-white/5 shadow-2xl">
+          {isInactivityLogout && (
+            <div className="mb-5 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 text-sm text-center flex items-center justify-center gap-2">
+              <svg className="w-4 h-4 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9 9V7a1 1 0 012 0v2a1 1 0 01-2 0zm0 4a1 1 0 102 0 1 1 0 00-2 0z" clipRule="evenodd" /></svg>
+              Sua sessão expirou por inatividade (5 min). Faça login novamente.
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="space-y-5">
             {serverError && (
               <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">

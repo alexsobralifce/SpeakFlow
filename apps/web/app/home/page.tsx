@@ -5,12 +5,15 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { TOPICS } from '@/features/conversation/components/ConversationScreen';
+import { useInactivityLogout } from '@/hooks/useInactivityLogout';
 
 export default function HomePage() {
   const router = useRouter();
+  useInactivityLogout(); // Logout after 5 minutes of inactivity
   const [level, setLevel] = useState<string>('intermediate');
   const [topic, setTopic] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string>('');
+  const [hasProfile, setHasProfile] = useState<boolean | null>(null); // null = loading
 
   // Default topic if none is selected for the current level
   useEffect(() => {
@@ -42,6 +45,18 @@ export default function HomePage() {
         }
       }
     }
+
+    // Check if user has a profile
+    fetch('/api/profile')
+      .then(res => res.json())
+      .then(data => {
+        setHasProfile(!!data.profile);
+        if (!data.profile) {
+          // also update email from server if not in localStorage
+          if (data.email && !userEmail) setUserEmail(data.email);
+        }
+      })
+      .catch(() => setHasProfile(false));
   }, []);
 
   const handleLevelChange = (l: string) => {
@@ -248,6 +263,43 @@ export default function HomePage() {
             </div>
 
           </div>
+          {/* Profile Agent Card */}
+          <div className="mt-10">
+            <div className="relative border border-white/10 bg-slate-900/40 backdrop-blur-md rounded-3xl p-6 shadow-2xl overflow-hidden">
+              {/* Warning badge when profile missing */}
+              {hasProfile === false && (
+                <div className="absolute top-4 right-4 flex items-center gap-1.5 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full px-3 py-1 text-xs font-bold">
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                  Perfil não encontrado
+                </div>
+              )}
+
+              <div className="flex items-start gap-5">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-500/20 to-indigo-500/20 border border-purple-500/20 flex items-center justify-center text-2xl shrink-0">
+                  🤖
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-white font-bold text-lg leading-tight mb-1">Assistente de Perfil IA</h3>
+                  <p className="text-slate-400 text-sm">
+                    {hasProfile
+                      ? 'Converse com nossa IA para atualizar suas preferências de aprendizado. Suas respostas personalizam cada sessão.'
+                      : 'Seu perfil ainda não foi configurado! Converse com nossa IA para personalizar sua experiência de aprendizado.'}
+                  </p>
+                  <Link
+                    href="/onboarding"
+                    className={`inline-flex items-center gap-2 mt-4 px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${hasProfile === false
+                        ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-lg shadow-amber-500/25'
+                        : 'bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30'
+                      }`}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3-3-3z" /></svg>
+                    {hasProfile === false ? 'Configurar Perfil Agora' : 'Atualizar Perfil com IA'}
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </main>
       </div>
     </div>

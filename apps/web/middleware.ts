@@ -20,7 +20,23 @@ export async function middleware(request: NextRequest) {
 
     try {
       // Verify JWT
-      await jwtVerify(token, JWT_SECRET);
+      const { payload } = await jwtVerify(token, JWT_SECRET);
+
+      // Enforce profile: if the user visits /home, check via the profile API.
+      // We pass the auth cookie forward so the API can identify the user.
+      if (pathname.startsWith('/home')) {
+        const profileRes = await fetch(new URL('/api/profile', request.url), {
+          headers: { Cookie: `speakflow_session=${token}` },
+        });
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          if (!profileData.profile) {
+            // No profile yet — redirect to onboarding
+            return NextResponse.redirect(new URL('/onboarding?required=true', request.url));
+          }
+        }
+      }
+
       return NextResponse.next();
     } catch (error) {
       // Token is invalid or expired

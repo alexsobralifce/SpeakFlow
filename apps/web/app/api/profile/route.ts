@@ -6,6 +6,32 @@ import { cookies } from "next/headers";
 const prisma = new PrismaClient();
 const JWT_SECRET = new TextEncoder().encode(process.env.NEXTAUTH_SECRET || "fallback-secret-for-dev");
 
+async function getAuthenticatedUserId(): Promise<string | null> {
+  try {
+    const cookieStore = cookies();
+    const token = cookieStore.get("speakflow_session")?.value;
+    if (!token) return null;
+    const { payload } = await jwtVerify(token, JWT_SECRET);
+    return payload.userId as string ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function GET() {
+  const userId = await getAuthenticatedUserId();
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, profile: true, level: true }
+  });
+
+  if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
+
+  return NextResponse.json({ email: user.email, profile: user.profile, level: user.level });
+}
+
 export async function POST(request: Request) {
   try {
     const cookieStore = cookies();
