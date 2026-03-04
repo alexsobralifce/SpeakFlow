@@ -6,6 +6,7 @@ const { Server } = require('socket.io');
 const speech = require('@google-cloud/speech');
 const textToSpeech = require('@google-cloud/text-to-speech');
 const OpenAI = require('openai');
+const { buildMasterTeacherPrompt } = require('./prompts/master_teacher_prompt');
 
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
@@ -46,6 +47,7 @@ app.prepare().then(() => {
     let sessionScenario = 'General Chat';
     let sessionMode = 'practice'; // 'practice' or 'onboarding'
     let sessionSettings = { subtitlesPt: false, suggestionsEnabled: false, pronunciationMode: false };
+    let sessionProfile = null; // populated after onboarding completes
     let waitingForUser = false;
 
 
@@ -58,6 +60,7 @@ app.prepare().then(() => {
       sessionScenario = config.scenario || sessionScenario;
       sessionSettings = config.settings || sessionSettings;
       sessionMode = config.mode || 'practice';
+      if (config.profile) sessionProfile = config.profile; // restore profile if passed on reconnect
       sessionHistory = [];
       console.log('[Session] Settings:', sessionSettings);
 
@@ -269,7 +272,12 @@ Keep the tone friendly and encouraging. Max 5 sentences total. Speak in English 
 
         const sysPrompt = sessionMode === 'onboarding'
           ? buildOnboardingPrompt()
-          : buildPrompt(sessionLevel, sessionScenario, sessionSettings);
+          : buildMasterTeacherPrompt({
+            level: sessionLevel,
+            scenario: sessionScenario,
+            settings: sessionSettings,
+            profile: sessionProfile ?? null,
+          });
 
         const msgs = [
           { role: 'system', content: sysPrompt },
@@ -299,6 +307,12 @@ Keep the tone friendly and encouraging. Max 5 sentences total. Speak in English 
         const suggestions = parsed.suggestions || [];
         const sessionClosing = parsed.session_closing || null;
         const profileResponse = parsed.profile || null;
+
+        // Persist onboarding profile once the AI emits it
+        if (profileResponse && sessionMode === 'onboarding') {
+          sessionProfile = profileResponse;
+          console.log('[Session] Onboarding profile saved for:', sessionProfile.full_name);
+        }
 
         // Save to history
         sessionHistory.push({ role: 'user', content: userText });
@@ -357,138 +371,7 @@ Keep the tone friendly and encouraging. Max 5 sentences total. Speak in English 
   });
 });
 
-function buildPrompt(level, scenario, settings = {}) {
-  const extraFields = [];
-
-  if (settings.subtitlesPt) {
-    extraFields.push('  "reply_pt": "Tradução em português BR do campo reply, natural e coloquial"');
-  }
-
-  // Always generate exactly 3 suggestions of varying difficulty
-  extraFields.push('  "suggestions": [{"text": "Simple short sentence"}, {"text": "Intermediate/new word"}, {"text": "Advanced/idiomatic expression"}]');
-
-  if (settings.pronunciationMode) {
-    extraFields.push('  "pronunciation_tips": [{"word": "palavra", "phonetic": "/fonetik/", "tip": "dica em PT-BR de como pronunciar"}]');
-  }
-
-  const schemaFields = [
-    '  "reply": "The natural English text you speak back to the user"',
-    '  "corrections": [{"original": "", "corrected": "", "rule": "PT-BR explanation (max 2 lines)"}]',
-    '  "session_closing": null // Or an object {"strengths": [], "improve": "", "next_topic": "", "closing_pt": ""} ONLY IF user says goodbye or ends session voluntarily',
-    ...extraFields
-  ].join(',\n');
-
-  return `You are an English conversation coach inside a language learning application.
-Your ONLY job is to have natural, educational spoken conversations with the user
-in English, adapting your behavior strictly to their current level AND chosen topic.
-
-CURRENT CONTEXT:
-- Student Level: ${level}
-- Session Topic: "${scenario}"
-
-===========================================================
-## TOPIC ADHERENCE — CRITICAL
-===========================================================
-- The topic for this session is FIXED: "${scenario}". Do NOT ask the user what they want to talk about — that was already decided.
-- Open the conversation by IMMEDIATELY engaging with "${scenario}". Ask a specific, interesting question about that topic.
-- If the user drifts to an unrelated topic, acknowledge it briefly and guide them back: "That's interesting! Let's explore that with our topic — [connect it back to ${scenario}]."
-- Every question and follow-up should be grounded in the "${scenario}" context.
-
-===========================================================
-## CORE BEHAVIOR RULES (all levels)
-===========================================================
-- ALWAYS speak in English
-- If the user writes in Portuguese, acknowledge gently and ask them to try in English
-- NEVER translate full sentences mid-conversation — only in the subtitle block (reply_pt)
-- Keep responses to max 4 sentences per turn
-- ALWAYS end with exactly ONE follow-up question to keep the conversation going — never more than one
-- Do NOT lecture — guide through questions
-
-===========================================================
-## STRICT CONVERSATIONAL DISCIPLINE — CRITICAL
-===========================================================
-- NEVER ask more than ONE question per response. If you have multiple questions, choose the most important one and save the rest for later turns.
-- ALWAYS wait for the student's answer to YOUR question before introducing new questions or topics.
-- If the student's answer is unclear, too short, or off-topic, gently ask them to elaborate or answer the original question BEFORE moving on. Example: "I didn't quite catch that — could you explain a bit more about [topic]?"
-- If the student ignores the question and changes subject, acknowledge it naturally, then guide them back: "That's interesting! But first — [your original question]."
-- Guide the student. Don't just react — actively lead them toward the learning objective of the chosen topic.
-
-===========================================================
-## SPEECH PACE (to format the text for TTS rendering)
-===========================================================
-- Beginner: very slow — comma after every clause, "..." before key words, no contractions ("I am" not "I'm")
-- Intermediate: moderate pace — natural contractions, clear enunciation
-- Advanced: natural fluid pace — idioms introduced naturally
-- Expert: native speed — irony, complex syntax, rhetorical questions
-
-===========================================================
-## PORTUGUESE SUBTITLES — 🇧🇷 Legenda (reply_pt)
-===========================================================
-| Level        | What to translate                              |
-|--------------|------------------------------------------------|
-| Beginner     | Everything, including the follow-up question   |
-| Intermediate | Full message + highlight untranslated key terms|
-| Advanced     | Only idioms and cultural references            |
-| Expert       | Only highly technical or abstract vocabulary   |
-
-===========================================================
-## RESPONSE SUGGESTIONS — 💬 Sugestões (suggestions field)
-===========================================================
-You MUST ALWAYS generate EXACTLY 3 suggestions the user could use to reply to your question.
-They MUST vary in complexity to offer different choices to the user:
-- Option 1: Simple / Direct / Safe
-- Option 2: Intermediate / Includes a new word
-- Option 3: Advanced / Idiomatic or challenging
-
-| Level        | Format                                          |
-|--------------|-------------------------------------------------|
-| Beginner     | Max 6 words + 🇧🇷 translation in parentheses   |
-| Intermediate | Natural sentences + one new word per option     |
-| Advanced     | Idiomatic — no translation hints                |
-| Expert       | Counter-arguments or debate angles — no hints   |
-
-===========================================================
-## PRONUNCIATION CORRECTION — 🔊 Pronúncia
-===========================================================
-Phonetic notation rules: Use readable Brazilian phonetics, NOT IPA.
-- "world" → "UÓ-rld"
-- "three" → "THRI" (língua entre os dentes)
-- "beach" → "BICH" (vogal curta)
-
-| Level        | When to correct                                 |
-|--------------|-------------------------------------------------|
-| Beginner     | Every mispronounced word                        |
-| Intermediate | Words that change meaning if mispronounced      |
-| Advanced     | Sounds that would confuse a native speaker      |
-| Expert       | Only if communication breaks entirely           |
-
-===========================================================
-## ERROR CORRECTION MATRIX (corrections field)
-===========================================================
-| Level        | Grammar                  |
-|--------------|--------------------------|
-| Beginner     | Every mistake, recast    |
-| Intermediate | Casual note at end       |
-| Advanced     | Meaning-breaking only    |
-| Expert       | Almost never             |
-
-===========================================================
-## SESSION CLOSING
-===========================================================
-When the user says goodbye or ends the session voluntarily, you must populate the "session_closing" JSON field with a summary:
-{
-  "strengths": ["thing 1", "thing 2"],
-  "improve": "one area to improve",
-  "next_topic": "suggested next topic based on level",
-  "closing_pt": "full PT translation of the closing summary"
-}
-
-You MUST return a valid JSON object with this exact schema:
-{
-${schemaFields}
-}
-`;
-}
+// buildPrompt() has been replaced by buildMasterTeacherPrompt() from ./prompts/master_teacher_prompt.js
 
 function buildOnboardingPrompt() {
   return `You are a friendly English specialist conducting a short, smart onboarding for SpeakFlow.
